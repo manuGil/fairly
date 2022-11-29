@@ -2,7 +2,7 @@ from typing import Any, List, Dict, Callable
 
 from . import Client
 from ..metadata import Metadata
-from ..person import Person
+from ..person import Person, PersonList
 from ..dataset.remote import RemoteDataset
 from ..file.local import LocalFile
 from ..file.remote import RemoteFile
@@ -15,6 +15,7 @@ from requests.exceptions import HTTPError
 from collections import OrderedDict
 import time
 import warnings
+import dateutil.parser
 
 CLASS_NAME = "FigshareClient"
 
@@ -54,14 +55,33 @@ class FigshareClient(Client):
         # Initialize properties
         self._categories = None
 
+
+    @classmethod
+    def get_config_parameters(cls) -> Dict:
+        """Returns configuration parameters
+
+        Args:
+            None
+
+        Returns:
+            Dictionary of configuration parameters.
+            Keys are the parameter names, values are the descriptions.
+        """
+        return {**super().get_config_parameters(), **{
+            "token": "Access token.",
+        }}
+
+
     @classmethod
     def get_config(cls, **kwargs) -> Dict:
         config = super().get_config(**kwargs)
+
         for key, val in kwargs.items():
             if key == "token":
                 config["token"] = val
             else:
                 pass
+
         return config
 
 
@@ -69,14 +89,14 @@ class FigshareClient(Client):
         session = super()._create_session()
 
         # Set authentication token
-        if "token" in self.config:
+        if self.config.get("token"):
             session.headers["Authorization"] = f"token {self.config['token']}"
 
         return session
 
 
     def _get_dataset_id(self, **kwargs) -> Dict:
-        """Returns standard dataset identifier
+        """Returns standard dataset identifier.
 
         Args:
             **kwargs: Dataset identifier arguments
@@ -124,7 +144,7 @@ class FigshareClient(Client):
 
 
     def _get_dataset_hash(self, id: Dict) -> str:
-        """Returns hash of the standard dataset identifier
+        """Returns hash of the standard dataset identifier.
 
         Args:
             id (Dict): Standard dataset identifier
@@ -139,7 +159,7 @@ class FigshareClient(Client):
 
 
     def _get_dataset_details(self, id: Dict) -> Dict:
-        """Retrieves details of the dataset
+        """Retrieves details of the dataset.
 
         Args:
             id (Dict): Standard dataset identifier
@@ -149,6 +169,7 @@ class FigshareClient(Client):
 
         Raises:
             ValueError("Invalid dataset id")
+            HTTPError
         """
         endpoints = []
         if id["version"]:
@@ -156,7 +177,7 @@ class FigshareClient(Client):
         else:
             endpoint = f"articles/{id['id']}"
         endpoints.append(endpoint)
-        if "token" in self.config:
+        if self.config.get("token"):
             endpoints.append(f"account/{endpoint}")
 
         details = None
@@ -191,7 +212,11 @@ class FigshareClient(Client):
                 break
             for item in items:
                 id = self.get_dataset_id(**item)
-                dataset = RemoteDataset(self, id)
+                dataset = RemoteDataset(self, id, {
+                    "title": item.get("title"),
+                    "url": item.get("url_public_html", item.get("url_private_html")),
+                    "doi": item.get("doi"),
+                })
                 datasets.append(dataset)
             page += 1
         return datasets
@@ -209,8 +234,16 @@ class FigshareClient(Client):
             List of license dictionaries
         """
         # REMARK: Private endpoint returns both public and private licenses
-        endpoint = "account/licenses" if "token" in self.config else "licenses"
-        items, _ = self._request(endpoint)
+        endpoints = ["account/licenses"] if self.config.get("token") else []
+        endpoints.append("licenses")
+
+        for endpoint in endpoints:
+            try:
+                items, _ = self._request(endpoint)
+                break
+            except HTTPError as err:
+                if err.response.status_code != 403:
+                    raise
 
         licenses = {}
 
@@ -239,7 +272,16 @@ class FigshareClient(Client):
         """
         # REMARK: Private endpoint returns both public and private categories
         # REMARK: Public endpoint does not return parent categories
-        items, _ = self._request("account/categories" if "token" in self.config else "categories")
+        endpoints = ["account/categories"] if self.config.get("token") else []
+        endpoints.append("categories")
+
+        for endpoint in endpoints:
+            try:
+                items, _ = self._request(endpoint)
+                break
+            except HTTPError as err:
+                if err.response.status_code != 403:
+                    raise
 
         categories = {}
 
@@ -303,7 +345,7 @@ class FigshareClient(Client):
         # Common attributes
 
         # Authors (editable)
-        val = []
+        val = PersonList()
         for item in details.get("authors", []):
             person = Person(
                 fullname = item.get("full_name"),
@@ -761,7 +803,7 @@ class FigshareClient(Client):
         with open(file.fullpath, "rb") as stream:
 
             tries = 0
-            total_size = 0
+            current_size = 0
 
             while True:
                 # Get upload information
@@ -791,10 +833,10 @@ class FigshareClient(Client):
                     response = requests.put(f"{upload_url}/{part['partNo']}", data=data)
                     response.raise_for_status()
 
-                    total_size += part_size
+                    current_size += part_size
 
                     if notify:
-                        notify(file, total_size)
+                        notify(file, current_size)
 
                 if done:
                     break
@@ -868,3 +910,82 @@ class FigshareClient(Client):
             elif err.response.status_code == 404:
                 raise ValueError("Invalid dataset id")
             raise
+
+
+    def get_details(self, id: Dict) -> Dict:
+        """Returns standard details of the specified dataset.
+
+        Details dictionary:
+            - title (str): Title
+            - url (str): URL address
+            - doi (str): DOI
+            - status (str): Status
+            - size (int): Total size of data files in bytes
+            - created (datetime.datetime): Creation date and time
+            - modified (datetime.datetime): Last modification date and time
+
+        Possible statuses are as follows:
+            - "draft": Dataset is not published yet.
+            - "public": Dataset is published and is publicly available.
+            - "embargoed": Dataset is published, but is under embargo.
+            - "restricted": Dataset is published, but accessible only under certain conditions.
+            - "closed": Dataset is published, but accessible only by the owners.
+            - "unknown": Dataset is in an unknown state.
+
+        Args:
+            id (Dict): Standard dataset id
+
+        Returns:
+            Details dictionary of the dataset.
+        """
+        details = self._get_dataset_details(id)
+
+        # REMARK: figshare API documentation does not provide information on
+        # possible status values.
+        status = details["status"]
+
+        if status == "draft":
+            pass
+
+        elif status == "public":
+
+            if details["is_embargoed"]:
+                if details["embargo_date"]:
+                    status = "restricted" if details["embargo_options"] else "embargoed"
+                else:
+                    status = "restricted" if details["embargo_options"] else "closed"
+
+            # REMARK: is_confidential flag is deprecated
+            # https://docs.figshare.com/#private_article_confidentiality_details
+            elif details["is_confidential"]:
+                status = "restricted"
+
+            # REMARK: There doesn't seem to be additional flags, but testing is
+            # required.
+            else:
+                status = "public"
+
+        else:
+            status = "unknown"
+
+        # Calculate data size
+        size = 0
+        for file in details.get("files", []):
+            size += file["size"]
+
+        # REMARK: dateutil.parser is required, because figshare dates are not
+        # fully ISO 8601 compliant (there is a timezone indicator at the end).
+        return {
+            "title": details["title"],
+            "url": details["url_public_html"] if "url_public_html" in details else details["url_private_url"],
+            "doi": details["doi"],
+            "status": status,
+            "size": size,
+            "created": dateutil.parser.isoparse(details["created_date"]),
+            "modified": dateutil.parser.isoparse(details["modified_date"]),
+        }
+
+
+    @classmethod
+    def supports_folder(cls) -> bool:
+        return False

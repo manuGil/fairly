@@ -10,7 +10,8 @@ from ..file.remote import RemoteFile
 # from ..client import Client
 
 import os
-import os.path
+import datetime
+from functools import cached_property
 
 class RemoteDataset(Dataset):
     """
@@ -18,10 +19,11 @@ class RemoteDataset(Dataset):
     Attributes:
         _client (Client): Client object
         _id (str): Dataset identifier
+        _details (Dict): Dataset details
 
     """
 
-    def __init__(self, client, id=None, **kwargs):
+    def __init__(self, client, id=None, details: Dict=None, **kwargs):
         """Initializes RemoteDataset object.
 
         Args:
@@ -35,6 +37,13 @@ class RemoteDataset(Dataset):
         self._client = client
         # Set dataset id
         self._id = client.get_dataset_id(id, **kwargs)
+
+        if id and isinstance(id, str):
+            key, val = Client.parse_id(id)
+            kwargs[key] = val
+
+        # REMARK: User-specific details should be validated once actual details becomes available
+        self._details = None if not details else details.copy()
 
 
     @property
@@ -84,9 +93,73 @@ class RemoteDataset(Dataset):
         for name, file in self.files.items():
             local_file = self._download_file(file, path, notify=notify)
             if extract and local_file.is_archive() and local_file.is_simple():
-                local_file.extract(path)
+                files = local_file.extract(path, notify=notify)
+                includes.append({file.path: files})
+                os.remove(local_file.fullpath)
             else:
                 includes.append(file.path)
         dataset.save_files()
 
         return dataset
+
+
+    def _get_detail(self, key: str, refresh: bool=False) -> Any:
+        if not self._details or key not in self._details or refresh:
+            self._details = self.client.get_details(self.id)
+
+        return self._details.get(key)
+
+
+    @property
+    def title(self) -> str:
+        """Title of the dataset."""
+        # REMARK: Title is usually part of the metadata
+        return self._get_detail("title")
+
+
+    @property
+    def url(self) -> str:
+        """URL address of the dataset."""
+        # REMARK: URL address might be part of the metadata
+        return self._get_detail("url")
+
+
+    @property
+    def doi(self) -> str:
+        """DOI of the dataset."""
+        # REMARK: DOI might be part of the metadata
+        return self._get_detail("doi")
+
+
+    @property
+    def status(self) -> str:
+        """Status of the dataset.
+
+        Possible statuses are as follows:
+            - "draft": Dataset is not published yet.
+            - "public": Dataset is published and is publicly available.
+            - "embargoed": Dataset is published, but is under embargo.
+            - "restricted": Dataset is published, but accessible only under certain conditions.
+            - "closed": Dataset is published, but accessible only by the owners.
+            - "error": Dataset is in an error state.
+            - "unknown": Dataset is in an unknown state.
+        """
+        return self._get_detail("status")
+
+
+    @property
+    def size(self) -> int:
+        """Total size of the dataset in bytes."""
+        return self._get_detail("size")
+
+
+    @cached_property
+    def created(self) -> datetime.datetime:
+        """Creation date and time of the dataset"""
+        return self._get_detail("created")
+
+
+    @property
+    def modified(self) -> datetime.datetime:
+        """Last modification date and time of the dataset"""
+        return self._get_detail("modified", refresh=True)
