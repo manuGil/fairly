@@ -317,7 +317,7 @@ class Client(ABC):
 
         """
 
-        if not getattr(fairly, "TESTING", False):
+        if not fairly.is_testing():
             # Patch HTTPConnection block size to improve connection speed
             # ref: https://stackoverflow.com/questions/72977722/python-requests-post-very-slow
             http.client.HTTPConnection.__init__.__defaults__ = tuple(
@@ -496,10 +496,6 @@ class Client(ABC):
         """
         # Get standard metadata attributes
         attrs = self._get_metadata(id)
-
-        # Append repository attributes
-        if self.repository_id:
-            attrs[f"{self.repository_id}_id"] = id
 
         # Return metadata
         return Metadata(normalize=self.normalize, **attrs)

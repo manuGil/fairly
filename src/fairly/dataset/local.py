@@ -33,12 +33,11 @@ class LocalDataset(Dataset):
 
     _regexps: Dict = {}
 
-    def __init__(self, path: str, manifest_file: str="manifest.yaml"):
+    def __init__(self, path: str):
         """Initializes LocalDataset object.
 
         Args:
             path (str): Path of the dataset
-            manifest_file (str): Name of the dataset manifest file (optional)
 
         Raises:
             NotADirectoryError = Invalid dataset path
@@ -54,7 +53,7 @@ class LocalDataset(Dataset):
         self._path = path
 
         # Set manifest path
-        self._manifest_path = os.path.join(path, manifest_file)
+        self._manifest_path = os.path.join(path, "manifest.yaml")
 
         # Set file rules
         self._includes = None
@@ -97,11 +96,6 @@ class LocalDataset(Dataset):
 
 
     @cached_property
-    def manifest(self) -> Dict:
-        return self._get_manifest()
-
-
-    @cached_property
     def path(self) -> str:
         """Path of the dataset"""
         return self._path
@@ -110,7 +104,9 @@ class LocalDataset(Dataset):
     @cached_property
     def template(self) -> str:
         """Metadata template of the dataset"""
-        return self.manifest["template"]
+        manifest = self._get_manifest()
+
+        return manifest["template"]
 
 
     @property
@@ -369,7 +365,7 @@ class LocalDataset(Dataset):
 
         for file in files.values():
 
-            if file.is_simple():
+            if file.is_simple:
                 uploads.append(file)
 
             elif strategy == "mirror":
